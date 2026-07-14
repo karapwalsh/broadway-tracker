@@ -31,6 +31,8 @@ const visitedCountEl = document.getElementById("visited-count");
 const progressFill = document.getElementById("progress-fill");
 const lastUpdatedEl = document.getElementById("last-updated");
 const exportBtn = document.getElementById("export-btn");
+const importBtn = document.getElementById("import-btn");
+const importInput = document.getElementById("import-input");
 
 const modalOverlay = document.getElementById("modal-overlay");
 const modalTitle = document.getElementById("modal-title");
@@ -390,6 +392,7 @@ searchInput.addEventListener("input", () => {
 // ---------- Export ----------
 exportBtn.addEventListener("click", () => {
   const rows = VENUES.map(v => ({
+    id: v.id,
     venue: v.name,
     team: v.group,
     location: v.location,
@@ -402,4 +405,64 @@ exportBtn.addEventListener("click", () => {
   a.download = "broadway-tracker-export.json";
   a.click();
   URL.revokeObjectURL(url);
+});
+
+// ---------- Import ----------
+// Bulk-loads visit records from a JSON file — an array of objects like:
+// [{ "id": "gershwin", "visited": true, "date": null, "opponent": "Wicked",
+//    "score": null, "withWho": null, "notes": null }, ...]
+// Matches each entry to a venue by "id" (see venues.js for valid ids) and writes
+// it to Firestore using your current signed-in session — same as any manual save.
+// Existing photos are preserved (import files don't carry photos).
+importBtn.addEventListener("click", () => {
+  if (!currentUser) { toast("Sign in first"); return; }
+  importInput.click();
+});
+
+importInput.addEventListener("change", async () => {
+  const file = importInput.files[0];
+  importInput.value = "";
+  if (!file) return;
+
+  let rows;
+  try {
+    rows = JSON.parse(await file.text());
+    if (!Array.isArray(rows)) throw new Error("Expected a JSON array");
+  } catch (err) {
+    toast("Couldn't read that file: " + err.message);
+    return;
+  }
+
+  const validIds = new Set(VENUES.map(v => v.id));
+  const matched = rows.filter(r => r && validIds.has(r.id));
+  const unmatched = rows.length - matched.length;
+
+  if (matched.length === 0) {
+    toast("No matching venue ids found in that file");
+    return;
+  }
+  if (!confirm(`Import ${matched.length} record(s)${unmatched ? ` (${unmatched} unmatched, skipped)` : ""}? This will overwrite existing details for any matching venues (photos are kept).`)) {
+    return;
+  }
+
+  let ok = 0, failed = 0;
+  for (const row of matched) {
+    try {
+      const existingPhoto = (visitsData[row.id] || {}).photoURL || null;
+      await saveVisit(row.id, {
+        visited: !!row.visited,
+        date: row.date || null,
+        opponent: row.opponent || null,
+        score: row.score || null,
+        withWho: row.withWho || null,
+        notes: row.notes || null,
+        photoURL: existingPhoto,
+      });
+      ok++;
+    } catch (err) {
+      console.error("Import failed for", row.id, err);
+      failed++;
+    }
+  }
+  toast(`Imported ${ok} record(s)${failed ? `, ${failed} failed` : ""}`);
 });
