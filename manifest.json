@@ -1,0 +1,9 @@
+{
+  "name": "Broadway Tracker",
+  "short_name": "Broadway",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#fdf6e3",
+  "theme_color": "#5c1a2b",
+  "icons": []
+}
