@@ -1,15 +1,13 @@
-// app.js — Broadway Tracker
+// app.js — Ballpark Tracker
 // Firebase Auth (Google sign-in) + Firestore (per-user data) + Storage (photos).
-// Each signed-in user reads/writes only their own documents at
-// users/{uid}/{COLLECTION_NAME}/{venueId} — a separate collection from the
-// Ballpark Tracker so the two apps' data never mixes, even in the same project.
+// Each signed-in user reads/writes only their own documents at users/{uid}/visits/{venueId}.
 
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
-import { VENUES, DIVISION_ORDER, ENTITY_LABEL_PLURAL, COLLECTION_NAME, STORAGE_PREFIX } from "./venues.js";
+import { VENUES, DIVISION_ORDER, ENTITY_LABEL_PLURAL } from "./venues.js";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
-  getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+  getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, doc, setDoc, deleteField, onSnapshot, collection, serverTimestamp
@@ -31,8 +29,6 @@ const visitedCountEl = document.getElementById("visited-count");
 const progressFill = document.getElementById("progress-fill");
 const lastUpdatedEl = document.getElementById("last-updated");
 const exportBtn = document.getElementById("export-btn");
-const importBtn = document.getElementById("import-btn");
-const importInput = document.getElementById("import-input");
 
 const modalOverlay = document.getElementById("modal-overlay");
 const modalTitle = document.getElementById("modal-title");
@@ -82,16 +78,29 @@ let currentFilter = "all";
 let searchTerm = "";
 
 // ---------- Auth ----------
+// Uses a full-page redirect rather than a popup: popups depend on third-party
+// cookies / window.opener messaging between the firebaseapp.com auth handler and
+// your app's domain, which many browsers now block by default (Safari, Brave,
+// Firefox strict mode, Chrome with tracking protection) — that's what causes the
+// "requested action is invalid" error for other people signing in. Redirect works
+// the same everywhere because it's just a normal page navigation.
 loginBtn.addEventListener("click", async () => {
   if (!isConfigured()) return;
   const provider = new GoogleAuthProvider();
   try {
-    await signInWithPopup(auth, provider);
+    await signInWithRedirect(auth, provider);
   } catch (err) {
     console.error(err);
     toast("Sign-in failed: " + err.message);
   }
 });
+
+if (isConfigured()) {
+  getRedirectResult(auth).catch((err) => {
+    console.error(err);
+    toast("Sign-in failed: " + err.message);
+  });
+}
 
 function renderHeaderRight() {
   if (!currentUser) { headerRight.innerHTML = ""; return; }
@@ -124,7 +133,7 @@ if (isConfigured()) {
 // ---------- Firestore sync ----------
 function subscribeToVisits(uid) {
   if (unsubscribeVisits) unsubscribeVisits();
-  const visitsCol = collection(db, "users", uid, COLLECTION_NAME);
+  const visitsCol = collection(db, "users", uid, "visits");
   unsubscribeVisits = onSnapshot(visitsCol, (snap) => {
     visitsData = {};
     snap.forEach((d) => { visitsData[d.id] = d.data(); });
@@ -136,12 +145,12 @@ function subscribeToVisits(uid) {
 }
 
 async function saveVisit(venueId, data) {
-  const ref_ = doc(db, "users", currentUser.uid, COLLECTION_NAME, venueId);
+  const ref_ = doc(db, "users", currentUser.uid, "visits", venueId);
   await setDoc(ref_, { ...data, updatedAt: serverTimestamp() }, { merge: false });
 }
 
 async function clearVisit(venueId) {
-  const ref_ = doc(db, "users", currentUser.uid, COLLECTION_NAME, venueId);
+  const ref_ = doc(db, "users", currentUser.uid, "visits", venueId);
   await setDoc(ref_, { visited: false, updatedAt: serverTimestamp() }, { merge: false });
 }
 
@@ -216,7 +225,7 @@ function renderCard(venue) {
   if (v.photoURL) {
     photo.innerHTML = `<img src="${v.photoURL}" alt="${venue.name}">`;
   } else {
-    photo.textContent = "🎭";
+    photo.textContent = "⚾";
   }
   if (visited) {
     const badge = document.createElement("div");
@@ -240,7 +249,7 @@ function renderCard(venue) {
     summary.className = "card-summary";
     const bits = [];
     if (v.date) bits.push(formatDate(v.date));
-    if (v.opponent) bits.push(v.opponent);
+    if (v.opponent) bits.push(`vs ${v.opponent}`);
     if (v.withWho) bits.push(`with ${v.withWho}`);
     summary.textContent = bits.join(" · ");
     card.appendChild(summary);
@@ -329,7 +338,7 @@ modalOverlay.addEventListener("click", (e) => {
 
 modalDelete.addEventListener("click", async () => {
   if (!activeVenueId) return;
-  if (!confirm("Clear all details for this theatre? This won't undo marking it as visited unless you also uncheck it.")) return;
+  if (!confirm("Clear all details for this ballpark? This won't undo marking it as visited unless you also uncheck it.")) return;
   try {
     await clearVisit(activeVenueId);
     toast("Details cleared");
@@ -347,7 +356,7 @@ modalSave.addEventListener("click", async () => {
   try {
     let photoURL = (visitsData[activeVenueId] || {}).photoURL || null;
     if (pendingPhotoFile) {
-      const path = `users/${currentUser.uid}/${STORAGE_PREFIX}/${activeVenueId}/${Date.now()}_${pendingPhotoFile.name}`;
+      const path = `users/${currentUser.uid}/${activeVenueId}/${Date.now()}_${pendingPhotoFile.name}`;
       const storageRef = ref(storage, path);
       await uploadBytes(storageRef, pendingPhotoFile);
       photoURL = await getDownloadURL(storageRef);
@@ -392,7 +401,6 @@ searchInput.addEventListener("input", () => {
 // ---------- Export ----------
 exportBtn.addEventListener("click", () => {
   const rows = VENUES.map(v => ({
-    id: v.id,
     venue: v.name,
     team: v.group,
     location: v.location,
@@ -402,67 +410,7 @@ exportBtn.addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "broadway-tracker-export.json";
+  a.download = "ballpark-tracker-export.json";
   a.click();
   URL.revokeObjectURL(url);
-});
-
-// ---------- Import ----------
-// Bulk-loads visit records from a JSON file — an array of objects like:
-// [{ "id": "gershwin", "visited": true, "date": null, "opponent": "Wicked",
-//    "score": null, "withWho": null, "notes": null }, ...]
-// Matches each entry to a venue by "id" (see venues.js for valid ids) and writes
-// it to Firestore using your current signed-in session — same as any manual save.
-// Existing photos are preserved (import files don't carry photos).
-importBtn.addEventListener("click", () => {
-  if (!currentUser) { toast("Sign in first"); return; }
-  importInput.click();
-});
-
-importInput.addEventListener("change", async () => {
-  const file = importInput.files[0];
-  importInput.value = "";
-  if (!file) return;
-
-  let rows;
-  try {
-    rows = JSON.parse(await file.text());
-    if (!Array.isArray(rows)) throw new Error("Expected a JSON array");
-  } catch (err) {
-    toast("Couldn't read that file: " + err.message);
-    return;
-  }
-
-  const validIds = new Set(VENUES.map(v => v.id));
-  const matched = rows.filter(r => r && validIds.has(r.id));
-  const unmatched = rows.length - matched.length;
-
-  if (matched.length === 0) {
-    toast("No matching venue ids found in that file");
-    return;
-  }
-  if (!confirm(`Import ${matched.length} record(s)${unmatched ? ` (${unmatched} unmatched, skipped)` : ""}? This will overwrite existing details for any matching venues (photos are kept).`)) {
-    return;
-  }
-
-  let ok = 0, failed = 0;
-  for (const row of matched) {
-    try {
-      const existingPhoto = (visitsData[row.id] || {}).photoURL || null;
-      await saveVisit(row.id, {
-        visited: !!row.visited,
-        date: row.date || null,
-        opponent: row.opponent || null,
-        score: row.score || null,
-        withWho: row.withWho || null,
-        notes: row.notes || null,
-        photoURL: existingPhoto,
-      });
-      ok++;
-    } catch (err) {
-      console.error("Import failed for", row.id, err);
-      failed++;
-    }
-  }
-  toast(`Imported ${ok} record(s)${failed ? `, ${failed} failed` : ""}`);
 });
