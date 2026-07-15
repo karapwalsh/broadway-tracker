@@ -7,7 +7,7 @@ import { VENUES, DIVISION_ORDER, ENTITY_LABEL_PLURAL } from "./venues.js";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
-  getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged
+  getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, doc, setDoc, deleteField, onSnapshot, collection, serverTimestamp
@@ -78,18 +78,29 @@ let currentFilter = "all";
 let searchTerm = "";
 
 // ---------- Auth ----------
-// Uses a full-page redirect rather than a popup: popups depend on third-party
-// cookies / window.opener messaging between the firebaseapp.com auth handler and
-// your app's domain, which many browsers now block by default (Safari, Brave,
-// Firefox strict mode, Chrome with tracking protection) — that's what causes the
-// "requested action is invalid" error for other people signing in. Redirect works
-// the same everywhere because it's just a normal page navigation.
+// Popup is the primary method — it's what's proven to work. Full-page redirect is
+// used only as a fallback if the popup itself is blocked, since redirect has its
+// own failure mode in Safari (storage gets wiped across the cross-site hop to
+// Google and back — a known Safari ITP limitation with no full fix short of
+// hosting the app and Firebase auth on the same top-level domain).
 loginBtn.addEventListener("click", async () => {
   if (!isConfigured()) return;
   const provider = new GoogleAuthProvider();
   try {
-    await signInWithRedirect(auth, provider);
+    await signInWithPopup(auth, provider);
   } catch (err) {
+    if (err.code === "auth/cancelled-popup-request" || err.code === "auth/popup-closed-by-user") {
+      return; // user closed the popup — not a real error
+    }
+    if (err.code === "auth/popup-blocked" || err.code === "auth/operation-not-supported-in-this-environment") {
+      try {
+        await signInWithRedirect(auth, provider);
+      } catch (err2) {
+        console.error(err2);
+        toast("Sign-in failed: " + err2.message);
+      }
+      return;
+    }
     console.error(err);
     toast("Sign-in failed: " + err.message);
   }
