@@ -1,16 +1,18 @@
-// app.js — Ballpark Tracker
+// app.js — Broadway Tracker
 // Firebase Auth (Google sign-in) + Firestore (per-user data) + Storage (photos).
-// Each signed-in user reads/writes only their own documents at users/{uid}/visits/{venueId}.
+// Each signed-in user reads/writes only their own documents at
+// users/{uid}/{COLLECTION_NAME}/{venueId} — a separate collection from the
+// Ballpark Tracker so the two apps' data never mixes, even in the same project.
 
 import { firebaseConfig, isConfigured } from "./firebase-config.js";
-import { VENUES, DIVISION_ORDER, ENTITY_LABEL_PLURAL } from "./venues.js";
+import { VENUES, DIVISION_ORDER, ENTITY_LABEL_PLURAL, COLLECTION_NAME, STORAGE_PREFIX } from "./venues.js";
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
-  getFirestore, doc, setDoc, deleteField, onSnapshot, collection, serverTimestamp
+  getFirestore, doc, setDoc, onSnapshot, collection, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import {
   getStorage, ref, uploadBytes, getDownloadURL
@@ -29,11 +31,17 @@ const visitedCountEl = document.getElementById("visited-count");
 const progressFill = document.getElementById("progress-fill");
 const lastUpdatedEl = document.getElementById("last-updated");
 const exportBtn = document.getElementById("export-btn");
+const importBtn = document.getElementById("import-btn");
+const importInput = document.getElementById("import-input");
 
 const modalOverlay = document.getElementById("modal-overlay");
 const modalTitle = document.getElementById("modal-title");
 const modalSub = document.getElementById("modal-sub");
 const modalVisited = document.getElementById("modal-visited");
+const visitsList = document.getElementById("visits-list");
+const visitsCountLabel = document.getElementById("visits-count-label");
+const addVisitBtn = document.getElementById("add-visit-btn");
+const visitForm = document.getElementById("visit-form");
 const photoInput = document.getElementById("photo-input");
 const photoPreview = document.getElementById("photo-preview");
 const fieldDate = document.getElementById("field-date");
@@ -41,9 +49,9 @@ const fieldOpponent = document.getElementById("field-opponent");
 const fieldScore = document.getElementById("field-score");
 const fieldWith = document.getElementById("field-with");
 const fieldNotes = document.getElementById("field-notes");
-const modalSave = document.getElementById("modal-save");
+const visitFormSave = document.getElementById("visit-form-save");
+const visitFormCancel = document.getElementById("visit-form-cancel");
 const modalCancel = document.getElementById("modal-cancel");
-const modalDelete = document.getElementById("modal-delete");
 const toastEl = document.getElementById("toast");
 
 let toastTimer = null;
@@ -74,8 +82,38 @@ let visitsData = {};       // venueId -> visit doc data
 let unsubscribeVisits = null;
 let pendingPhotoFile = null;
 let activeVenueId = null;
+let editingVisitId = null;   // id of the visit entry currently open in visit-form, or null when adding new
 let currentFilter = "all";
 let searchTerm = "";
+
+// ---------- Visits array helpers ----------
+// Each venue doc can hold multiple visits: { visited, visits: [{id,date,opponent,
+// score,withWho,notes,photoURL}], updatedAt }. Older docs saved before this feature
+// existed (including anything from Import) have those same fields at the top level
+// instead of in an array — this reads either shape so nothing gets lost.
+function getVisitsArray(venueId) {
+  const v = visitsData[venueId] || {};
+  if (Array.isArray(v.visits)) return v.visits;
+  if (v.date || v.opponent || v.score || v.withWho || v.notes || v.photoURL) {
+    return [{
+      id: "legacy",
+      date: v.date || null,
+      opponent: v.opponent || null,
+      score: v.score || null,
+      withWho: v.withWho || null,
+      notes: v.notes || null,
+      photoURL: v.photoURL || null,
+    }];
+  }
+  return [];
+}
+
+function getMostRecentPhoto(visits) {
+  for (let i = visits.length - 1; i >= 0; i--) {
+    if (visits[i].photoURL) return visits[i].photoURL;
+  }
+  return null;
+}
 
 // ---------- Auth ----------
 // Popup is the primary method — it's what's proven to work. Full-page redirect is
@@ -144,7 +182,7 @@ if (isConfigured()) {
 // ---------- Firestore sync ----------
 function subscribeToVisits(uid) {
   if (unsubscribeVisits) unsubscribeVisits();
-  const visitsCol = collection(db, "users", uid, "visits");
+  const visitsCol = collection(db, "users", uid, COLLECTION_NAME);
   unsubscribeVisits = onSnapshot(visitsCol, (snap) => {
     visitsData = {};
     snap.forEach((d) => { visitsData[d.id] = d.data(); });
@@ -156,13 +194,8 @@ function subscribeToVisits(uid) {
 }
 
 async function saveVisit(venueId, data) {
-  const ref_ = doc(db, "users", currentUser.uid, "visits", venueId);
+  const ref_ = doc(db, "users", currentUser.uid, COLLECTION_NAME, venueId);
   await setDoc(ref_, { ...data, updatedAt: serverTimestamp() }, { merge: false });
-}
-
-async function clearVisit(venueId) {
-  const ref_ = doc(db, "users", currentUser.uid, "visits", venueId);
-  await setDoc(ref_, { visited: false, updatedAt: serverTimestamp() }, { merge: false });
 }
 
 // ---------- Quick toggle from card ----------
@@ -227,16 +260,18 @@ function renderAll() {
 function renderCard(venue) {
   const v = visitsData[venue.id] || {};
   const visited = !!v.visited;
+  const visits = getVisitsArray(venue.id);
+  const photoURL = getMostRecentPhoto(visits);
 
   const card = document.createElement("div");
   card.className = "card" + (visited ? " visited" : "");
 
   const photo = document.createElement("div");
   photo.className = "card-photo";
-  if (v.photoURL) {
-    photo.innerHTML = `<img src="${v.photoURL}" alt="${venue.name}">`;
+  if (photoURL) {
+    photo.innerHTML = `<img src="${photoURL}" alt="${venue.name}">`;
   } else {
-    photo.textContent = "⚾";
+    photo.textContent = "🎭";
   }
   if (visited) {
     const badge = document.createElement("div");
@@ -255,14 +290,26 @@ function renderCard(venue) {
   `;
   card.appendChild(body);
 
-  if (visited && (v.date || v.opponent || v.withWho)) {
+  if (visits.length === 1) {
+    const v0 = visits[0];
+    if (v0.date || v0.opponent || v0.withWho) {
+      const summary = document.createElement("div");
+      summary.className = "card-summary";
+      const bits = [];
+      if (v0.date) bits.push(formatDate(v0.date));
+      if (v0.opponent) bits.push(v0.opponent);
+      if (v0.withWho) bits.push(`with ${v0.withWho}`);
+      summary.textContent = bits.join(" · ");
+      card.appendChild(summary);
+    }
+  } else if (visits.length > 1) {
     const summary = document.createElement("div");
     summary.className = "card-summary";
-    const bits = [];
-    if (v.date) bits.push(formatDate(v.date));
-    if (v.opponent) bits.push(`vs ${v.opponent}`);
-    if (v.withWho) bits.push(`with ${v.withWho}`);
-    summary.textContent = bits.join(" · ");
+    const last = visits[visits.length - 1];
+    const lastBits = [];
+    if (last.date) lastBits.push(formatDate(last.date));
+    if (last.opponent) lastBits.push(last.opponent);
+    summary.textContent = `${visits.length} visits` + (lastBits.length ? ` · latest: ${lastBits.join(", ")}` : "");
     card.appendChild(summary);
   }
 
@@ -284,7 +331,7 @@ function renderCard(venue) {
 
   const editBtn = document.createElement("button");
   editBtn.className = "btn-outline btn-small";
-  editBtn.textContent = visited ? "Edit details" : "Add details";
+  editBtn.textContent = visits.length > 0 ? "Manage visits" : "Add details";
   editBtn.addEventListener("click", () => openModal(venue));
   footer.appendChild(editBtn);
 
@@ -302,34 +349,107 @@ function formatDate(iso) {
 // ---------- Modal ----------
 function openModal(venue) {
   activeVenueId = venue.id;
-  pendingPhotoFile = null;
-  const v = visitsData[venue.id] || {};
-
   modalTitle.textContent = venue.name;
   modalSub.textContent = `${venue.group} — ${venue.location}`;
-  modalVisited.checked = !!v.visited;
-  fieldDate.value = v.date || "";
-  fieldOpponent.value = v.opponent || "";
-  fieldScore.value = v.score || "";
-  fieldWith.value = v.withWho || "";
-  fieldNotes.value = v.notes || "";
-  photoInput.value = "";
-
-  if (v.photoURL) {
-    photoPreview.innerHTML = `<img src="${v.photoURL}" alt="">`;
-  } else {
-    photoPreview.innerHTML = "📷 No photo yet";
-  }
-
-  modalDelete.style.display = v.visited || v.date || v.opponent || v.notes ? "inline-block" : "none";
+  modalVisited.checked = !!(visitsData[venue.id] || {}).visited;
+  closeVisitForm();
+  renderVisitsList();
   modalOverlay.classList.add("open");
 }
 
 function closeModal() {
   modalOverlay.classList.remove("open");
   activeVenueId = null;
-  pendingPhotoFile = null;
+  closeVisitForm();
 }
+
+modalCancel.addEventListener("click", closeModal);
+modalOverlay.addEventListener("click", (e) => {
+  if (e.target === modalOverlay) closeModal();
+});
+
+// "Been here" checkbox saves immediately, independent of any visit entries.
+modalVisited.addEventListener("change", () => {
+  if (!activeVenueId) return;
+  toggleVisited(activeVenueId, modalVisited.checked);
+});
+
+// ---------- Visits list (inside the modal) ----------
+function renderVisitsList() {
+  const visits = activeVenueId ? getVisitsArray(activeVenueId) : [];
+  visitsCountLabel.textContent = visits.length > 0 ? `Your visits (${visits.length})` : "Your visits";
+  visitsList.innerHTML = "";
+
+  if (visits.length === 0) {
+    visitsList.innerHTML = `<div class="visits-empty">No visits logged yet — that's fine, the checkbox above already marks you as having been here.</div>`;
+    return;
+  }
+
+  visits.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "visit-row";
+
+    const thumb = document.createElement("div");
+    thumb.className = "visit-row-photo";
+    thumb.innerHTML = entry.photoURL ? `<img src="${entry.photoURL}" alt="">` : "🎭";
+    row.appendChild(thumb);
+
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "visit-row-body";
+    const titleBits = [];
+    if (entry.date) titleBits.push(formatDate(entry.date));
+    if (entry.opponent) titleBits.push(entry.opponent);
+    const subBits = [];
+    if (entry.score) subBits.push(entry.score);
+    if (entry.withWho) subBits.push(`with ${entry.withWho}`);
+    bodyEl.innerHTML = `
+      <div class="visit-row-title">${titleBits.length ? titleBits.join(" — ") : "No date/show logged"}</div>
+      ${subBits.length ? `<div class="visit-row-sub">${subBits.join(" · ")}</div>` : ""}
+      ${entry.notes ? `<div class="visit-row-notes">${entry.notes}</div>` : ""}
+    `;
+    row.appendChild(bodyEl);
+
+    const actions = document.createElement("div");
+    actions.className = "visit-row-actions";
+    const editBtn = document.createElement("button");
+    editBtn.className = "btn-outline btn-small";
+    editBtn.textContent = "Edit";
+    editBtn.addEventListener("click", () => openVisitForm(entry));
+    actions.appendChild(editBtn);
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn-danger btn-small";
+    delBtn.textContent = "Delete";
+    delBtn.addEventListener("click", () => deleteVisitEntry(entry.id));
+    actions.appendChild(delBtn);
+    row.appendChild(actions);
+
+    visitsList.appendChild(row);
+  });
+}
+
+function openVisitForm(entry) {
+  editingVisitId = entry ? entry.id : null;
+  pendingPhotoFile = null;
+  fieldDate.value = entry?.date || "";
+  fieldOpponent.value = entry?.opponent || "";
+  fieldScore.value = entry?.score || "";
+  fieldWith.value = entry?.withWho || "";
+  fieldNotes.value = entry?.notes || "";
+  photoInput.value = "";
+  photoPreview.innerHTML = entry?.photoURL ? `<img src="${entry.photoURL}" alt="">` : "📷 No photo yet";
+  visitForm.style.display = "block";
+  addVisitBtn.style.display = "none";
+}
+
+function closeVisitForm() {
+  editingVisitId = null;
+  pendingPhotoFile = null;
+  visitForm.style.display = "none";
+  addVisitBtn.style.display = "inline-block";
+}
+
+addVisitBtn.addEventListener("click", () => openVisitForm(null));
+visitFormCancel.addEventListener("click", closeVisitForm);
 
 photoInput.addEventListener("change", () => {
   const file = photoInput.files[0];
@@ -342,39 +462,24 @@ photoInput.addEventListener("change", () => {
   reader.readAsDataURL(file);
 });
 
-modalCancel.addEventListener("click", closeModal);
-modalOverlay.addEventListener("click", (e) => {
-  if (e.target === modalOverlay) closeModal();
-});
-
-modalDelete.addEventListener("click", async () => {
-  if (!activeVenueId) return;
-  if (!confirm("Clear all details for this ballpark? This won't undo marking it as visited unless you also uncheck it.")) return;
-  try {
-    await clearVisit(activeVenueId);
-    toast("Details cleared");
-    closeModal();
-  } catch (err) {
-    console.error(err);
-    toast("Couldn't clear: " + err.message);
-  }
-});
-
-modalSave.addEventListener("click", async () => {
+visitFormSave.addEventListener("click", async () => {
   if (!activeVenueId || !currentUser) return;
-  modalSave.disabled = true;
-  modalSave.textContent = "Saving...";
+  visitFormSave.disabled = true;
+  visitFormSave.textContent = "Saving...";
   try {
-    let photoURL = (visitsData[activeVenueId] || {}).photoURL || null;
+    const visits = getVisitsArray(activeVenueId).slice();
+    const existingIndex = editingVisitId ? visits.findIndex(v => v.id === editingVisitId) : -1;
+    let photoURL = existingIndex >= 0 ? (visits[existingIndex].photoURL || null) : null;
+
     if (pendingPhotoFile) {
-      const path = `users/${currentUser.uid}/${activeVenueId}/${Date.now()}_${pendingPhotoFile.name}`;
+      const path = `users/${currentUser.uid}/${STORAGE_PREFIX}/${activeVenueId}/${Date.now()}_${pendingPhotoFile.name}`;
       const storageRef = ref(storage, path);
       await uploadBytes(storageRef, pendingPhotoFile);
       photoURL = await getDownloadURL(storageRef);
     }
 
-    const data = {
-      visited: modalVisited.checked,
+    const entry = {
+      id: existingIndex >= 0 ? visits[existingIndex].id : `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: fieldDate.value || null,
       opponent: fieldOpponent.value.trim() || null,
       score: fieldScore.value.trim() || null,
@@ -382,17 +487,41 @@ modalSave.addEventListener("click", async () => {
       notes: fieldNotes.value.trim() || null,
       photoURL: photoURL || null,
     };
-    await saveVisit(activeVenueId, data);
-    toast("Saved!");
-    closeModal();
+
+    if (existingIndex >= 0) {
+      visits[existingIndex] = entry;
+    } else {
+      visits.push(entry);
+    }
+
+    await saveVisit(activeVenueId, { visited: true, visits });
+    modalVisited.checked = true;
+    toast("Visit saved!");
+    closeVisitForm();
+    renderVisitsList();
   } catch (err) {
     console.error(err);
     toast("Couldn't save: " + err.message);
   } finally {
-    modalSave.disabled = false;
-    modalSave.textContent = "Save";
+    visitFormSave.disabled = false;
+    visitFormSave.textContent = "Save visit";
   }
 });
+
+async function deleteVisitEntry(entryId) {
+  if (!activeVenueId) return;
+  if (!confirm("Delete this visit? This won't uncheck 'I've been here' — untick that separately if you want to.")) return;
+  try {
+    const visits = getVisitsArray(activeVenueId).filter(v => v.id !== entryId);
+    const stillVisited = (visitsData[activeVenueId] || {}).visited;
+    await saveVisit(activeVenueId, { visited: !!stillVisited, visits });
+    toast("Visit deleted");
+    renderVisitsList();
+  } catch (err) {
+    console.error(err);
+    toast("Couldn't delete: " + err.message);
+  }
+}
 
 // ---------- Filters / search ----------
 chips.forEach((chip) => {
@@ -412,6 +541,7 @@ searchInput.addEventListener("input", () => {
 // ---------- Export ----------
 exportBtn.addEventListener("click", () => {
   const rows = VENUES.map(v => ({
+    id: v.id,
     venue: v.name,
     team: v.group,
     location: v.location,
@@ -421,7 +551,71 @@ exportBtn.addEventListener("click", () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "ballpark-tracker-export.json";
+  a.download = "broadway-tracker-export.json";
+  // Safari/Firefox silently ignore .click() on an <a download> that isn't in the
+  // document — it has to be attached, clicked, then removed.
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
+// ---------- Import ----------
+// Bulk-loads visit records from a JSON file — an array of objects like:
+// [{ "id": "gershwin", "visited": true, "date": null, "opponent": "Wicked",
+//    "score": null, "withWho": null, "notes": null }, ...]
+// Matches each entry to a venue by "id" (see venues.js for valid ids) and writes
+// it to Firestore using your current signed-in session — same as any manual save.
+// Existing photos are preserved (import files don't carry photos).
+importBtn.addEventListener("click", () => {
+  if (!currentUser) { toast("Sign in first"); return; }
+  importInput.click();
+});
+
+importInput.addEventListener("change", async () => {
+  const file = importInput.files[0];
+  importInput.value = "";
+  if (!file) return;
+
+  let rows;
+  try {
+    rows = JSON.parse(await file.text());
+    if (!Array.isArray(rows)) throw new Error("Expected a JSON array");
+  } catch (err) {
+    toast("Couldn't read that file: " + err.message);
+    return;
+  }
+
+  const validIds = new Set(VENUES.map(v => v.id));
+  const matched = rows.filter(r => r && validIds.has(r.id));
+  const unmatched = rows.length - matched.length;
+
+  if (matched.length === 0) {
+    toast("No matching venue ids found in that file");
+    return;
+  }
+  if (!confirm(`Import ${matched.length} record(s)${unmatched ? ` (${unmatched} unmatched, skipped)` : ""}? This will overwrite existing details for any matching venues (photos are kept).`)) {
+    return;
+  }
+
+  let ok = 0, failed = 0;
+  for (const row of matched) {
+    try {
+      const existingPhoto = (visitsData[row.id] || {}).photoURL || null;
+      await saveVisit(row.id, {
+        visited: !!row.visited,
+        date: row.date || null,
+        opponent: row.opponent || null,
+        score: row.score || null,
+        withWho: row.withWho || null,
+        notes: row.notes || null,
+        photoURL: existingPhoto,
+      });
+      ok++;
+    } catch (err) {
+      console.error("Import failed for", row.id, err);
+      failed++;
+    }
+  }
+  toast(`Imported ${ok} record(s)${failed ? `, ${failed} failed` : ""}`);
 });
