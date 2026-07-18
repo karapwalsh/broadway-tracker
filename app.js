@@ -108,9 +108,22 @@ function getVisitsArray(venueId) {
   return [];
 }
 
+// Sorts by date descending (most recently seen first), not entry order. Dated
+// visits always sort before undated ones; undated visits keep their original
+// relative order (stable sort).
+function sortVisitsByDate(visits) {
+  return visits.slice().sort((a, b) => {
+    if (a.date && b.date) return b.date.localeCompare(a.date);
+    if (a.date && !b.date) return -1;
+    if (!a.date && b.date) return 1;
+    return 0;
+  });
+}
+
 function getMostRecentPhoto(visits) {
-  for (let i = visits.length - 1; i >= 0; i--) {
-    if (visits[i].photoURL) return visits[i].photoURL;
+  const sorted = sortVisitsByDate(visits);
+  for (const v of sorted) {
+    if (v.photoURL) return v.photoURL;
   }
   return null;
 }
@@ -311,7 +324,7 @@ function renderCard(venue) {
   } else if (visits.length > 1) {
     const summary = document.createElement("div");
     summary.className = "card-summary";
-    const last = visits[visits.length - 1];
+    const last = sortVisitsByDate(visits)[0];
     const lastBits = [];
     if (last.date) lastBits.push(formatDate(last.date));
     if (last.opponent) lastBits.push(last.opponent);
@@ -394,7 +407,7 @@ function renderVisitsList() {
     return;
   }
 
-  visits.forEach((entry) => {
+  sortVisitsByDate(visits).forEach((entry) => {
     const row = document.createElement("div");
     row.className = "visit-row";
 
