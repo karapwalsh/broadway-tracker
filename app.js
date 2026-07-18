@@ -283,10 +283,12 @@ function renderCard(venue) {
 
   const body = document.createElement("div");
   body.className = "card-body";
+  const searchQuery = encodeURIComponent(`${venue.name} Broadway now playing`);
   body.innerHTML = `
     <div class="venue-name">${venue.name}</div>
     <div class="team-name">${venue.group}</div>
     <div class="city">${venue.location}</div>
+    <a class="whats-playing-link" href="https://www.google.com/search?q=${searchQuery}" target="_blank" rel="noopener noreferrer">What's playing? &rarr;</a>
   `;
   card.appendChild(body);
 
