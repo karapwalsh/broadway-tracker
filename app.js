@@ -284,10 +284,14 @@ function renderCard(venue) {
   const body = document.createElement("div");
   body.className = "card-body";
   const searchQuery = encodeURIComponent(`${venue.name} Broadway now playing`);
+  const formerNamesHTML = (venue.formerNames && venue.formerNames.length)
+    ? `<div class="former-names">Formerly: ${venue.formerNames.join(", ")}</div>`
+    : "";
   body.innerHTML = `
     <div class="venue-name">${venue.name}</div>
     <div class="team-name">${venue.group}</div>
     <div class="city">${venue.location}</div>
+    ${formerNamesHTML}
     <a class="whats-playing-link" href="https://www.google.com/search?q=${searchQuery}" target="_blank" rel="noopener noreferrer">What's playing? &rarr;</a>
   `;
   card.appendChild(body);
@@ -352,7 +356,10 @@ function formatDate(iso) {
 function openModal(venue) {
   activeVenueId = venue.id;
   modalTitle.textContent = venue.name;
-  modalSub.textContent = `${venue.group} — ${venue.location}`;
+  const formerLine = (venue.formerNames && venue.formerNames.length)
+    ? `<br><span class="former-names">Formerly: ${venue.formerNames.join(", ")}</span>`
+    : "";
+  modalSub.innerHTML = `${venue.group} — ${venue.location}${formerLine}`;
   modalVisited.checked = !!(visitsData[venue.id] || {}).visited;
   closeVisitForm();
   renderVisitsList();
